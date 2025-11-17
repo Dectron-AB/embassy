@@ -9,13 +9,22 @@
 use core::mem::ManuallyDrop;
 
 use embassy_hal_internal::Peri;
+use stm32_metapac::timer::vals::{Etp, Etps};
 // Re-export useful enums
-pub use stm32_metapac::timer::vals::{FilterValue, Mms as MasterMode, Sms as SlaveMode, Ts as TriggerSource};
+pub use stm32_metapac::timer::vals::{FilterValue, Mms as MasterMode, Sms as SlaveMode, Ts};
 
 use super::*;
 use crate::pac::timer::vals;
 use crate::time::Hertz;
 use crate::{dma, rcc};
+
+enum TriggerSource {
+    Internal,
+    Etr,
+    Ch1Filtered,
+    Ch1EdgeDetector,
+    Ch2Filtered,
+}
 
 /// Input capture mode.
 #[derive(Clone, Copy)]
@@ -37,6 +46,33 @@ pub enum InputTISelection {
     Alternate,
     /// TRC
     TRC,
+}
+
+#[derive(Clone, Copy)]
+pub enum ChannelMode {
+    InternalOutput {
+        duty: u16,
+    },
+    Input {
+        filter: FilterValue,
+        mode: InputCaptureMode,
+        ti_selection: InputTISelection,
+        prescaler_factor: Etps,
+    },
+    Output {
+        mode: OutputCompareMode,
+        duty: u16,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ExternalTrigger {
+    Unused,
+    Etr {
+        filter: FilterValue,
+        polarity: Etp,
+        trigger_prescaler: Etps,
+    },
 }
 
 impl From<InputTISelection> for stm32_metapac::timer::vals::CcmrInputCcs {
@@ -593,6 +629,30 @@ impl<'d, T: GeneralInstance4Channel> Timer<'d, T> {
             .modify(|r| r.set_ccs(raw_channel % 2, tisel.into()));
     }
 
+    pub fn set_channel_mode(&mut self, channel: Channel, mode: ChannelMode) {
+        match mode {
+            ChannelMode::InternalOutput { duty } => {
+                self.set_output_compare_mode(channel, OutputCompareMode::Frozen);
+                self.set_compare_value(channel, duty as u32)
+            }
+            ChannelMode::Input {
+                filter,
+                mode,
+                ti_selection,
+                prescaler_factor,
+            } => {
+                self.set_input_capture_filter(channel, filter);
+                self.set_input_capture_mode(channel, mode);
+                self.set_input_capture_prescaler(channel, prescaler_factor as u8);
+                self.set_input_ti_selection(channel, ti_selection);
+            }
+            ChannelMode::Output { mode, duty } => {
+                self.set_output_compare_mode(channel, mode);
+                self.set_compare_value(channel, duty as u32)
+            }
+        }
+    }
+
     /// Set input capture mode.
     pub fn set_input_capture_mode(&self, channel: Channel, mode: InputCaptureMode) {
         self.regs_gp16().ccer().modify(|r| match mode {
@@ -916,8 +976,19 @@ impl<'d, T: GeneralInstance4Channel> Timer<'d, T> {
     }
 
     /// Set Timer Trigger Source
-    pub fn set_trigger_source(&self, ts: TriggerSource) {
+    pub fn set_trigger_source(&self, ts: Ts) {
         self.regs_gp16().smcr().modify(|r| r.set_ts(ts));
+    }
+
+    pub fn set_trigger_in(&mut self, ts: TriggerSource) {
+        let ts = match ts {
+            TriggerSource::Internal => Ts::ITR0,
+            TriggerSource::Etr => Ts::TI1F_ED,
+            TriggerSource::Ch1Filtered => Ts::TI1FP1,
+            TriggerSource::Ch1EdgeDetector => Ts::TI1F_ED,
+            TriggerSource::Ch2Filtered => Ts::TI2FP2,
+        };
+        self.set_trigger_source(ts);
     }
 }
 
